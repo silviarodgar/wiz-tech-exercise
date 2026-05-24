@@ -1,0 +1,258 @@
+name: "App CI/CD — Build, Scan & Deploy"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - "helm/**"
+      - ".github/workflows/app-build-deploy.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - "helm/**"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag to deploy (leave blank to use git SHA)"
+        required: false
+
+permissions:
+  contents: read
+  security-events: write  # for SARIF uploads
+  id-token: write         # for OIDC auth with AWS (optional)
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}          # e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}      # e.g. wiz-exercise/tasky
+  EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}  # e.g. wiz-exercise-eks
+  HELM_RELEASE_NAME: tasky
+  HELM_NAMESPACE: default
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────────
+  # JOB 1: Build the container image
+  # ──────────────────────────────────────────────────────────────────────────────
+  build:
+    name: "Build Container Image"
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      full_image: ${{ steps.meta.outputs.full_image }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          SHORT_SHA=${GITHUB_SHA::8}
+          TAG=${{ github.event.inputs.image_tag || '' }}
+          IMAGE_TAG=${TAG:-$SHORT_SHA}
+          FULL_IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "full_image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
+          echo "Image: ${FULL_IMAGE}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image to ECR
+        uses: docker/build-push-action@v5
+        with:
+          context: app/
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ steps.meta.outputs.full_image }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save image tarball (for scanning on PRs)
+        if: github.event_name == 'pull_request'
+        run: |
+          docker build -t tasky-local:scan app/
+          docker save tasky-local:scan -o /tmp/tasky-image.tar
+
+      - name: Upload image artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tasky-image
+          path: /tmp/tasky-image.tar
+          retention-days: 1
+
+  # ──────────────────────────────────────────────────────────────────────────────
+  # JOB 2: Security scanning — Trivy + Grype container image scan
+  # ──────────────────────────────────────────────────────────────────────────────
+  image-security-scan:
+    name: "Container Image Security Scan"
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Trivy: full vulnerability scan ────────────────────────────────────────
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ needs.build.outputs.full_image }}"
+          format: sarif
+          output: trivy-results.sarif
+          severity: "CRITICAL,HIGH"
+          exit-code: "0"   # don't block (intentional old image in exercise)
+          ignore-unfixed: true
+        env:
+          TRIVY_USERNAME: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          TRIVY_PASSWORD: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+      # ── Trivy: Dockerfile/config scan ─────────────────────────────────────────
+      - name: Run Trivy config scan on Dockerfile
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: app/
+          format: sarif
+          output: trivy-config-results.sarif
+          exit-code: "0"
+
+      - name: Upload Trivy config SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-config-results.sarif
+          category: trivy-config
+
+      # ── Grype: additional CVE scanner ─────────────────────────────────────────
+      - name: Run Grype scanner
+        uses: anchore/scan-action@v3
+        with:
+          image: "${{ needs.build.outputs.full_image }}"
+          fail-build: false
+          severity-cutoff: critical
+          output-format: sarif
+        continue-on-error: true
+
+      - name: Upload Grype SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: results.sarif
+          category: grype
+
+      - name: Summarize scan results
+        run: |
+          echo "## Container Security Scan Summary 🔍" >> $GITHUB_STEP_SUMMARY
+          echo "Image scanned: \`${{ needs.build.outputs.full_image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Results uploaded to GitHub Security tab (SARIF)." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> Note: Vulnerabilities are expected in the base alpine:3.17.0 image (intentional for Wiz exercise)." >> $GITHUB_STEP_SUMMARY
+
+  # ──────────────────────────────────────────────────────────────────────────────
+  # JOB 3: Deploy to EKS via Helm (main branch only)
+  # ──────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: "Deploy to EKS"
+    runs-on: ubuntu-latest
+    needs:
+      - build
+      - image-security-scan
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production  # optional: require manual approval
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.14.4"
+
+      - name: Deploy tasky via Helm
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE_NAME }} ./helm/tasky \
+            --namespace ${{ env.HELM_NAMESPACE }} \
+            --create-namespace \
+            --set image.repository="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}" \
+            --set image.tag="${{ needs.build.outputs.image_tag }}" \
+            --set mongodb.uri="${{ secrets.MONGODB_URI }}" \
+            --atomic \
+            --timeout 5m \
+            --wait
+
+      - name: Verify deployment
+        run: |
+          echo "## Deployment Status ✅" >> $GITHUB_STEP_SUMMARY
+
+          kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }}-tasky \
+            -n ${{ env.HELM_NAMESPACE }} --timeout=3m
+
+          echo "### Pods" >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n ${{ env.HELM_NAMESPACE }} -l app.kubernetes.io/name=tasky \
+            --no-headers >> $GITHUB_STEP_SUMMARY
+
+          echo "### Ingress / ALB URL" >> $GITHUB_STEP_SUMMARY
+          kubectl get ingress -n ${{ env.HELM_NAMESPACE }} >> $GITHUB_STEP_SUMMARY
+
+      - name: Validate wizexercise.txt in running container
+        run: |
+          POD=$(kubectl get pods -n ${{ env.HELM_NAMESPACE }} \
+            -l app.kubernetes.io/name=tasky \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "Checking wizexercise.txt in pod: $POD"
+          CONTENT=$(kubectl exec -n ${{ env.HELM_NAMESPACE }} $POD -- cat /app/wizexercise.txt)
+          echo "wizexercise.txt content: $CONTENT"
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### wizexercise.txt validation" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "$CONTENT" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

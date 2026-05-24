@@ -1,0 +1,73 @@
+# Default values for tasky.
+# Override these per environment with -f values-prod.yaml or --set key=value
+
+replicaCount: 2
+
+image:
+  # Set this to your ECR repo URL after terraform apply
+  repository: ""  # e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com/wiz-exercise/tasky
+  tag: "latest"
+  pullPolicy: Always
+
+# MongoDB connection — set via --set or a sealed secret in production
+mongodb:
+  # The full connection URI is stored in a Kubernetes Secret
+  # mongodb://tasky:<password>@<mongodb-private-ip>:27017/go-mongodb?authSource=go-mongodb
+  uri: ""  # Override at deploy time: --set mongodb.uri="mongodb://..."
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /
+  hosts:
+    - host: ""   # Leave empty for ALB to auto-assign DNS
+      paths:
+        - path: /
+          pathType: Prefix
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+# INTENTIONAL WEAKNESS: cluster-admin privileges for the pod
+rbac:
+  clusterAdmin: true
+
+serviceAccount:
+  create: true
+  name: tasky-sa
+
+# Liveness & readiness probes
+livenessProbe:
+  httpGet:
+    path: /
+    port: 8080
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80

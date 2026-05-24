@@ -1,0 +1,12 @@
+apiVersion: v2
+name: tasky
+description: Tasky - Todo list app backed by MongoDB (Wiz Tech Exercise)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+maintainers:
+  - name: Silvia Rodriguez Garcia
+keywords:
+  - tasky
+  - mongodb
+  - todo

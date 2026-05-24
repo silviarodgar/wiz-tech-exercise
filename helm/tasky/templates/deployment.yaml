@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tasky.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tasky.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tasky.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tasky.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+
+      containers:
+        - name: tasky
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          # MongoDB URI from Kubernetes Secret (env var per exercise spec)
+          env:
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tasky.fullname" . }}-secret
+                  key: MONGODB_URI
+
+          # INTENTIONAL WEAKNESS: container runs with cluster-admin privileges
+          # (ClusterRoleBinding grants this at the SA level)
+          securityContext:
+            allowPrivilegeEscalation: true   # intentional weakness
+            runAsNonRoot: false              # intentional weakness
+
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

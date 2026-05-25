@@ -16,12 +16,11 @@ terraform {
     }
   }
 
-  # Uncomment and configure for remote state (recommended)
-  # backend "s3" {
-  #   bucket = "your-tf-state-bucket"
-  #   key    = "wiz-tech-exercise/terraform.tfstate"
-  #   region = "us-east-1"
-  # }
+  backend "s3" {
+    bucket = "wiz-exercise-tfstate-839581577096"
+    key    = "wiz-tech-exercise/terraform.tfstate"
+    region = "us-east-1"
+  }
 }
 
 provider "aws" {

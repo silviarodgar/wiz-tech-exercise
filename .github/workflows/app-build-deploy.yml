@@ -203,7 +203,6 @@ jobs:
       - build
       - image-security-scan
     if: always() && needs.build.result == 'success' && github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: production  # optional: require manual approval
 
     steps:
       - name: Checkout code

@@ -242,7 +242,9 @@ jobs:
         run: |
           echo "## Deployment Status ✅" >> $GITHUB_STEP_SUMMARY
 
-          kubectl rollout status deployment/${{ env.HELM_RELEASE_NAME }}-tasky \
+          # Use label selector — avoids hardcoding the Helm-generated deployment name
+          kubectl rollout status deployment \
+            -l app.kubernetes.io/name=tasky \
             -n ${{ env.HELM_NAMESPACE }} --timeout=3m
 
           echo "### Pods" >> $GITHUB_STEP_SUMMARY

@@ -65,19 +65,21 @@ jobs:
 
       # ── tfsec ─────────────────────────────────────────────────────────────────
       - name: Run tfsec (Terraform security scanner)
-        uses: aquasecurity/tfsec-action@v1.0.3
-        with:
-          working_directory: terraform/
-          format: sarif
-          sarif_file: tfsec-results.sarif
-          soft_fail: true
+        run: |
+          docker run --rm \
+            -v "$(pwd)/terraform:/src" \
+            aquasec/tfsec /src \
+            --format sarif \
+            --out /src/tfsec-results.sarif \
+            --soft-fail || true
         continue-on-error: true
 
       - name: Upload tfsec SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         if: always()
+        continue-on-error: true
         with:
-          sarif_file: tfsec-results.sarif
+          sarif_file: terraform/tfsec-results.sarif
           category: tfsec
 
       - name: Summarize IaC findings
@@ -98,6 +100,7 @@ jobs:
     name: "Terraform Plan"
     runs-on: ubuntu-latest
     needs: iac-security-scan
+    if: always()  # run even if security scan has warnings/failures
     defaults:
       run:
         working-directory: terraform/

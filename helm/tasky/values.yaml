@@ -1,7 +1,7 @@
 # Default values for tasky.
 # Override these per environment with -f values-prod.yaml or --set key=value
 
-replicaCount: 2
+replicaCount: 3
 
 image:
   # Set this to your ECR repo URL after terraform apply
